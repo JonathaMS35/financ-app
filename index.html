@@ -427,10 +427,8 @@ async function doRegister(){
 
 async function doLogout(){
   if(!confirm('Deseja sair da sua conta?')) return;
-  // Salvar dados antes de sair
-  S.syncing=false;
-  await saveToCloud();
-  await supa.auth.signOut();
+  try{ S.syncing=false; await saveToCloud(); }catch(e){console.warn(e);}
+  try{ await supa.auth.signOut(); }catch(e){}
   S={...S,data:{},user:null};
   T_={entradas:[],contas:[]};
   document.getElementById('app').style.display='none';
@@ -438,13 +436,6 @@ async function doLogout(){
   showLogin();
 }
 
-// ─── SYNC ─────────────────────────────────────────────────────────
-function setSyncStatus(status){
-  const dot=document.getElementById('sync-dot');
-  if(!dot) return;
-  dot.className='sync-dot'+(status==='syncing'?' syncing':status==='offline'?' offline':'');
-  dot.title=status==='syncing'?'Sincronizando...':status==='offline'?'Sem conexão':'Sincronizado';
-}
 
 async function loadFromCloud(){
   if(!supa||!S.user) return;
@@ -488,49 +479,50 @@ async function loadFromCloud(){
 }
 
 async function saveToCloud(){
-  if(!supa||!S.user||S.syncing) return;
+  if(!supa||!S.user) return;
+  if(S.syncing){ scheduleSave(); return; }
   S.syncing=true;
   setSyncStatus('syncing');
   try{
-    // Salvar perfil
-    const{error:pErr}=await supa.from('profiles').upsert({
-      id:S.user.id,
-      nome:S.cfg.nome,
-      foto:S.cfg.foto||null,
-      re_meta:S.cfg.reMeta,
-      meta_nome:S.cfg.metaNome,
-      meta_val:S.cfg.metaVal,
-      fs:S.cfg.fs,
-      dark:S.cfg.dark||false
-    });
-    if(pErr) console.error('Erro perfil:',pErr.message);
+    const uid=S.user.id;
 
-    // Salvar TODOS os meses que existem em S.data
-    const mesesEntries=Object.entries(S.data);
-    for(const[mes,dados] of mesesEntries){
-      const{error:mErr}=await supa.from('meses').upsert({
-        user_id:S.user.id,
-        mes:mes,
-        dados:dados,
+    // ── Salvar perfil ──
+    await supa.from('profiles').upsert({
+      id:uid,
+      nome:S.cfg.nome||'',
+      foto:S.cfg.foto||null,
+      re_meta:S.cfg.reMeta||5000,
+      meta_nome:S.cfg.metaNome||'Meta pessoal',
+      meta_val:S.cfg.metaVal||500,
+      fs:S.cfg.fs||100,
+      dark:!!S.cfg.dark
+    },{ignoreDuplicates:false});
+
+    // ── Salvar todos os meses ──
+    const entries=Object.entries(S.data);
+    if(entries.length>0){
+      const rows=entries.map(([mes,dados])=>({
+        user_id:uid, mes, dados,
         updated_at:new Date().toISOString()
-      },{onConflict:'user_id,mes'});
-      if(mErr) console.error('Erro mes '+mes+':',mErr.message);
+      }));
+      const{error:mErr}=await supa.from('meses')
+        .upsert(rows,{onConflict:'user_id,mes',ignoreDuplicates:false});
+      if(mErr) throw new Error('meses: '+mErr.message);
     }
 
-    // Salvar templates
-    const{error:tErr}=await supa.from('templates').upsert({
-      user_id:S.user.id,
+    // ── Salvar templates ──
+    await supa.from('templates').upsert({
+      user_id:uid,
       dados:T_,
       updated_at:new Date().toISOString()
-    },{onConflict:'user_id'});
-    if(tErr) console.error('Erro templates:',tErr.message);
+    },{onConflict:'user_id',ignoreDuplicates:false});
 
     setSyncStatus('ok');
+    console.log('✅ Dados salvos no Supabase');
   }catch(e){
-    console.error('Erro saveToCloud:',e.message);
+    console.error('❌ Erro ao salvar:',e.message);
     setSyncStatus('offline');
   }finally{
-    // SEMPRE resetar syncing, mesmo com erro
     S.syncing=false;
   }
 }
