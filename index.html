@@ -427,6 +427,9 @@ async function doRegister(){
 
 async function doLogout(){
   if(!confirm('Deseja sair da sua conta?')) return;
+  // Salvar dados antes de sair
+  S.syncing=false;
+  await saveToCloud();
   await supa.auth.signOut();
   S={...S,data:{},user:null};
   T_={entradas:[],contas:[]};
@@ -447,9 +450,9 @@ async function loadFromCloud(){
   if(!supa||!S.user) return;
   setSyncStatus('syncing');
   try{
-    // Carregar perfil — se tabela nao existe, erro e tratado no catch
+    // Carregar perfil
     const{data:prof,error:profErr}=await supa.from('profiles').select('*').eq('id',S.user.id).single();
-    if(profErr&&profErr.code!=='PGRST116'){console.warn('Perfil:',profErr.message);}
+    if(profErr&&profErr.code!=='PGRST116') console.warn('Perfil:',profErr.message);
     if(prof){
       S.cfg={
         nome:prof.nome||S.user.user_metadata?.nome||'',
@@ -465,17 +468,21 @@ async function loadFromCloud(){
       applyFs(S.cfg.fs);
       updateHeaderProfile();
     }
-    // Carregar meses
-    const{data:meses}=await supa.from('meses').select('*').eq('user_id',S.user.id);
-    if(meses){
+    // Carregar TODOS os meses
+    const{data:meses,error:mErr}=await supa.from('meses').select('*').eq('user_id',S.user.id);
+    if(mErr) console.error('Erro carregar meses:',mErr.message);
+    if(meses&&meses.length>0){
       S.data={};
-      meses.forEach(m=>{S.data[m.mes]=m.dados;});
+      meses.forEach(m=>{S.data[m.mes]=m.dados||{entradas:[],gastos:[],contas:[],reservas:[]};});
+      console.log('Meses carregados:',Object.keys(S.data));
     }
     // Carregar templates
-    const{data:tpl}=await supa.from('templates').select('*').eq('user_id',S.user.id).single();
+    const{data:tpl,error:tErr}=await supa.from('templates').select('*').eq('user_id',S.user.id).single();
+    if(tErr&&tErr.code!=='PGRST116') console.warn('Templates:',tErr.message);
     if(tpl&&tpl.dados) T_=tpl.dados;
     setSyncStatus('ok');
   }catch(e){
+    console.error('Erro loadFromCloud:',e.message);
     setSyncStatus('offline');
   }
 }
@@ -486,7 +493,7 @@ async function saveToCloud(){
   setSyncStatus('syncing');
   try{
     // Salvar perfil
-    await supa.from('profiles').upsert({
+    const{error:pErr}=await supa.from('profiles').upsert({
       id:S.user.id,
       nome:S.cfg.nome,
       foto:S.cfg.foto||null,
@@ -496,25 +503,36 @@ async function saveToCloud(){
       fs:S.cfg.fs,
       dark:S.cfg.dark||false
     });
-    // Salvar mes atual
-    const md=getMD();
-    await supa.from('meses').upsert({
-      user_id:S.user.id,
-      mes:S.mon,
-      dados:md,
-      updated_at:new Date().toISOString()
-    },{onConflict:'user_id,mes'});
+    if(pErr) console.error('Erro perfil:',pErr.message);
+
+    // Salvar TODOS os meses que existem em S.data
+    const mesesEntries=Object.entries(S.data);
+    for(const[mes,dados] of mesesEntries){
+      const{error:mErr}=await supa.from('meses').upsert({
+        user_id:S.user.id,
+        mes:mes,
+        dados:dados,
+        updated_at:new Date().toISOString()
+      },{onConflict:'user_id,mes'});
+      if(mErr) console.error('Erro mes '+mes+':',mErr.message);
+    }
+
     // Salvar templates
-    await supa.from('templates').upsert({
+    const{error:tErr}=await supa.from('templates').upsert({
       user_id:S.user.id,
       dados:T_,
       updated_at:new Date().toISOString()
     },{onConflict:'user_id'});
+    if(tErr) console.error('Erro templates:',tErr.message);
+
     setSyncStatus('ok');
   }catch(e){
+    console.error('Erro saveToCloud:',e.message);
     setSyncStatus('offline');
+  }finally{
+    // SEMPRE resetar syncing, mesmo com erro
+    S.syncing=false;
   }
-  S.syncing=false;
 }
 
 function scheduleSave(){
